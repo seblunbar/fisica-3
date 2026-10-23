@@ -27,12 +27,23 @@
     // El máximo se calcula a partir del cilindro para que NUNCA sea más grande que él.
     // OJO: RADIO_CILINDRO y ALTURA_CILINDRO deben coincidir con radius y height
     // de los <a-cylinder> que están más abajo en el HTML.
-    const RADIO_CILINDRO = 0.28;                            // radio del tubo contenedor
+    const RADIO_CILINDRO = 0.35;                            // radio del tubo contenedor
     const MARGEN_CILINDRO = 0.03;                           // holgura entre esfera máxima y pared del tubo
-    const RADIO_ESFERA_MAX = RADIO_CILINDRO - MARGEN_CILINDRO; // 0.25: la esfera más grande que cabe
-    const RADIO_ESFERA_MIN = 0.12;                          // la esfera más chica
-    const ALTURA_CILINDRO = ESFERAS_POR_COLOR * 2 * RADIO_ESFERA_MAX + 0.05; // caben todas, incluso si todas salen del tamaño máximo (1.55)
+    const RADIO_ESFERA_MAX = RADIO_CILINDRO - MARGEN_CILINDRO; // 0.32: la esfera más grande que cabe
+    const RADIO_ESFERA_MIN = 0.18;                          // la esfera más chica
+    const ALTURA_CILINDRO = ESFERAS_POR_COLOR * 2 * RADIO_ESFERA_MAX + 0.05; // caben todas, incluso si todas salen del tamaño máximo (1.97)
     const SEPARACION_ESFERAS = RADIO_ESFERA_MAX * 2 + 0.05; // espacio entre centros al aparecer (evita choques)
+
+    // --- ESFERAS BLANCAS (tecla Q): no valen puntos, solo sirven para aventar ---
+    const RADIO_BLANCA_MIN = 0.15;   // radio mínimo de una blanca
+    const RADIO_BLANCA_MAX = 0.35;   // radio máximo de una blanca
+    const DISTANCIA_BLANCA = 1.2;    // a cuántos metros de tu cabeza aparece, hacia donde miras
+    const MAX_BLANCAS = 20;          // si creas más, desaparece la más vieja (para no saturar la física)
+
+    // --- GRAVEDAD (tecla E la invierte) Y TECHO ---
+    const GRAVEDAD = 9.8;            // m/s². Debe coincidir con el valor de physics gravity en el HTML (allá con signo -)
+    const ALTURA_TECHO = 8;          // altura de la cara de ABAJO del techo (metros)
+    const ALTURA_OJOS = 1.6;         // la misma altura de la cámara (#camara) respecto a tus pies
 
     // Los colores del juego. Debe haber un contenedor con el mismo "nombre"
     // (mira los cilindros con contenedor="color: ..." más abajo en el HTML).
@@ -62,6 +73,7 @@
     const FISICA_ESFERA = 'mass: 1; linearDamping: 0.3; angularDamping: 0.5';
 
     let puntos = 0;                 // puntos acumulados por las esferas ya guardadas
+    let gravedadInvertida = false;  // false = cae hacia abajo, true = cae hacia el techo
     const teclas = {};              // qué teclas están presionadas
     const palanca = { x: 0, y: 0 }; // joystick izquierdo del control del Quest
     let quiereSaltar = false;       // se pone en true al presionar Espacio o el botón A
@@ -76,7 +88,11 @@
        La cámara (#rig) solo copia la posición de esta esfera.
        ===================================================================== */
     AFRAME.registerComponent('jugador', {
-      tick: function () {
+      init: function () {
+        this.mezcla = 0;                       // 0 = cabeza arriba (normal), 1 = cabeza abajo (gravedad invertida)
+      },
+
+      tick: function (tiempo, delta) {
         const cuerpo = this.el.body;           // el cuerpo físico (Cannon.js)
         if (!cuerpo) return;                   // aún no se crea
 
@@ -107,20 +123,29 @@
         //    Le damos velocidad hacia arriba y la gravedad lo vuelve a bajar.
         if (quiereSaltar) {
           if (Math.abs(cuerpo.velocity.y) < 0.1) {
-            cuerpo.velocity.y = FUERZA_SALTO;
+            // Con la gravedad invertida "arriba" es hacia el piso, así que el salto cambia de sentido
+            cuerpo.velocity.y = gravedadInvertida ? -FUERZA_SALTO : FUERZA_SALTO;
           }
           quiereSaltar = false;                // un salto por cada vez que presionas
         }
 
         // 5. Si se cae del mundo, regresa a la entrada
-        if (cuerpo.position.y < -5) {
+        if (cuerpo.position.y < -5 || cuerpo.position.y > ALTURA_TECHO + 5) {
           cuerpo.position.set(0, RADIO_PIES, 4);
           cuerpo.velocity.set(0, 0, 0);
         }
 
-        // 6. La cámara sigue a la esfera (los pies quedan en la parte de abajo)
+        // 6. La cámara sigue a la esfera.
+        //    Normal: los pies quedan abajo de la esfera y la cabeza arriba.
+        //    Invertida: los pies quedan ARRIBA de la esfera (en el techo) y la cabeza cuelga hacia abajo.
+        //    "mezcla" cambia poco a poco entre los dos casos para que la cámara no pegue un brinco.
+        const objetivo = gravedadInvertida ? 1 : 0;
+        this.mezcla += (objetivo - this.mezcla) * Math.min(1, (delta / 1000) * 6);
+        const desfaseNormal = -RADIO_PIES;                         // rig = esfera - radio
+        const desfaseInvertido = RADIO_PIES - 2 * ALTURA_OJOS;     // cabeza = parte de arriba de la esfera - altura de ojos
+        const desfase = desfaseNormal + (desfaseInvertido - desfaseNormal) * this.mezcla;
         const p = this.el.object3D.position;
-        document.querySelector('#rig').object3D.position.set(p.x, p.y - RADIO_PIES, p.z);
+        document.querySelector('#rig').object3D.position.set(p.x, p.y + desfase, p.z);
       }
     });
 
@@ -146,10 +171,10 @@
           // Math.random() da un valor entre 0 y 1; lo "estiramos" al rango que queremos.
           const radioEsfera = RADIO_ESFERA_MIN + Math.random() * (RADIO_ESFERA_MAX - RADIO_ESFERA_MIN);
 
-          // Posición inicial: encima de la cesta (centro en x = 2.5, z = -3).
+          // Posición inicial: encima de la cesta (centro en x = 3, z = -3).
           // La separación es mayor que el diámetro de la esfera más grande,
           // así ninguna nace tocando a otra y no salen disparadas.
-          const x = 2.5 + (columna - (columnas - 1) / 2) * SEPARACION_ESFERAS;
+          const x = 3 + (columna - (columnas - 1) / 2) * SEPARACION_ESFERAS;
           const z = -3 + (fila - (filas - 1) / 2) * SEPARACION_ESFERAS;
           const y = 1.0 + fila * 0.1;                  // cada fila cae un poquito después
 
@@ -244,7 +269,8 @@
     AFRAME.registerComponent('agarrable', {
       schema: {
         color:  { type: 'string' },            // el color de esta esfera (ej. "rojo")
-        puntos: { type: 'int', default: 1 }    // cuántos puntos vale al guardarla
+        puntos: { type: 'int', default: 1 },   // cuántos puntos vale al guardarla
+        guardable: { type: 'boolean', default: true }  // false = no se guarda en tubos (las blancas)
       },
 
       init: function () {
@@ -300,6 +326,17 @@
         if (this.colocada || this.mano) return;
 
         const posicion = this.el.object3D.position;
+
+        // Si se sale del mundo (por ejemplo cae por la orilla del piso):
+        // las de color regresan a la cesta y las blancas se borran
+        if (posicion.y < -10 || posicion.y > ALTURA_TECHO + 10) {
+          if (this.data.guardable) this.reiniciar();
+          else this.el.remove();
+          return;
+        }
+
+        if (!this.data.guardable) return;   // las blancas no se guardan en ningún tubo
+
         const contenedores = document.querySelectorAll('[contenedor]');
 
         for (const el of contenedores) {
@@ -316,6 +353,14 @@
             this.reiniciar();
           }
           return;
+        }
+      },
+
+      // Si la esfera se borra mientras la traes en la mano, soltamos el "mouseup"
+      remove: function () {
+        if (this.mano) {
+          this.mano.removeEventListener('mouseup', this.soltar);
+          this.mano = null;
         }
       },
 
@@ -347,6 +392,60 @@
         v.negate();
       }
       return v;
+    }
+
+
+    /* Dónde está tu cabeza en el mundo (igual que arriba: usamos el objeto "camera" de three.js) */
+    function posicionCabeza() {
+      const v = new THREE.Vector3();
+      const camara = document.querySelector('#camara');
+      (camara.getObject3D('camera') || camara.object3D).getWorldPosition(v);
+      return v;
+    }
+
+
+    /* TECLA Q: crea una esfera blanca frente a ti, con radio aleatorio entre
+       RADIO_BLANCA_MIN y RADIO_BLANCA_MAX. No vale puntos ni se guarda en tubos:
+       sirve para agarrarla y aventarla (o aventar cosas con ella). */
+    function crearBlanca() {
+      // Si ya hay demasiadas, borramos la más vieja (la primera en el documento)
+      const existentes = document.querySelectorAll('.blanca');
+      if (existentes.length >= MAX_BLANCAS) existentes[0].remove();
+
+      const radio = RADIO_BLANCA_MIN + Math.random() * (RADIO_BLANCA_MAX - RADIO_BLANCA_MIN);
+
+      // Aparece hacia donde miras, pero limitamos cuánto puede apuntar arriba/abajo
+      // para que no nazca encima de tus pies si miras directo al piso.
+      const mirada = direccionMirada();
+      mirada.y = Math.max(-0.5, Math.min(0.5, mirada.y));
+      mirada.normalize();
+      const pos = posicionCabeza().add(mirada.multiplyScalar(DISTANCIA_BLANCA));
+
+      const esfera = document.createElement('a-sphere');
+      esfera.setAttribute('position', pos.x + ' ' + pos.y + ' ' + pos.z);
+      esfera.setAttribute('radius', radio);
+      esfera.setAttribute('color', '#FFFFFF');
+      esfera.setAttribute('class', 'agarrable blanca');   // "agarrable" para el láser, "blanca" para encontrarlas
+      esfera.setAttribute('agarrable', 'color: blanco; puntos: 0; guardable: false');
+      esfera.setAttribute('dynamic-body', FISICA_ESFERA);
+      document.querySelector('a-scene').appendChild(esfera);
+    }
+
+
+    /* TECLA E: invierte la gravedad (cae hacia el techo) y otra vez para regresarla */
+    function invertirGravedad() {
+      gravedadInvertida = !gravedadInvertida;
+      const g = gravedadInvertida ? GRAVEDAD : -GRAVEDAD;
+
+      const escena = document.querySelector('a-scene');
+      const sistema = escena.systems.physics;
+      if (sistema && sistema.driver && sistema.driver.world) {
+        const mundo = sistema.driver.world;         // el mundo de Cannon.js
+        mundo.gravity.set(0, g, 0);
+        mundo.bodies.forEach(function (cuerpo) { cuerpo.wakeUp(); });  // despertamos a los que estaban quietos
+      } else {
+        escena.setAttribute('physics', 'gravity', g);                  // respaldo
+      }
     }
 
 
@@ -383,7 +482,9 @@
       document.querySelectorAll('[contenedor]').forEach(function (tubo) {
         tubo.components.contenedor.vaciar();
       });
-      // ...y regresamos todas las esferas a la cesta
+      // ...borramos las esferas blancas (no tienen cesta a la cual volver)...
+      document.querySelectorAll('.blanca').forEach(function (b) { b.remove(); });
+      // ...y regresamos todas las esferas de color a la cesta
       document.querySelectorAll('[agarrable]').forEach(function (esfera) {
         esfera.components.agarrable.reiniciar();
       });
@@ -429,6 +530,8 @@
     window.addEventListener('keydown', function (e) {
       teclas[e.code] = true;
       if (e.code === 'KeyR') reiniciar();
+      if (e.code === 'KeyQ' && !e.repeat) crearBlanca();         // Q = esfera blanca
+      if (e.code === 'KeyE' && !e.repeat) invertirGravedad();    // E = invertir gravedad
       if (e.code === 'Space') {
         quiereSaltar = true;
         e.preventDefault();                  // que la página no haga scroll
@@ -442,7 +545,7 @@
   <!-- physics: gravity es la aceleración en Y (m/s²).
        PRUEBA CAMBIAR: -1.62 (Luna) o -24.8 (Júpiter).
        Pon debug: true para ver en alambre las formas físicas. -->
-  <a-scene physics="gravity: -5; restitution: 0.3; friction: 0.2; iterations: 25; debug: false">
+  <a-scene physics="gravity: -9.8; restitution: 0.3; friction: 0.2; iterations: 25; debug: false">
 
     <!-- El sonido debe estar en la misma carpeta que este HTML -->
     <a-assets>
@@ -458,6 +561,13 @@
          (en un solo cuadro avanza más de lo que mide el piso). -->
     <a-box static-body position="0 -0.5 -3" width="30" height="1" depth="30" color="#7BC8A4"></a-box>
 
+    <!-- TECHO (estático): igual que el piso pero arriba, para que nada se vaya volando
+         al invertir la gravedad (tecla E). Su cara de abajo está en y = ALTURA_TECHO (8 m),
+         por eso el centro va en 8 + 0.5 = 8.5. Es semitransparente para que se vea el cielo;
+         pon opacity="1" si lo quieres sólido. -->
+    <a-box static-body position="0 8.5 -3" width="30" height="1" depth="30"
+           color="#B0BEC5" opacity="0.3"></a-box>
+
 
     <!-- ================= CASTILLO (todo es static-body) =================
          Patio: de x = -5 a 5, y de z = 0 a -10.
@@ -470,7 +580,7 @@
     <!-- Muros de los lados y del fondo -->
     <a-box static-body position="-5 1.25 -5" width="0.3" height="2.5" depth="10" color="#8C867A"></a-box>
     <a-box static-body position="5 1.25 -5" width="0.3" height="2.5" depth="10" color="#8C867A"></a-box>
-    <a-box static-body position="0 2 -10" width="10.3" height="4" depth="0.3" color="#8C867A"></a-box>
+    <a-box static-body position="0 2.5 -10" width="10.3" height="5" depth="0.3" color="#8C867A"></a-box>
 
     <!-- Terraza: una caja maciza de 1.2 m de alto -->
     <a-box static-body position="0 0.6 -8.5" width="10" height="1.2" depth="3" color="#A59F92"></a-box>
@@ -485,13 +595,13 @@
 
 
     <!-- ================= CESTA donde caen las esferas al inicio =================
-         Una caja sin tapa de 2.4 × 2.4 m (cuatro paredes) con centro en x = 2.5, z = -3.
-         Es más grande y con paredes más altas (0.6 m) porque las esferas ahora son
-         más grandes y así no se salen al caer.                                    -->
-    <a-box static-body position="2.5 0.3 -1.8" width="2.5" height="0.6" depth="0.1" color="#5D4037"></a-box>
-    <a-box static-body position="2.5 0.3 -4.2" width="2.5" height="0.6" depth="0.1" color="#5D4037"></a-box>
-    <a-box static-body position="1.3 0.3 -3"   width="0.1" height="0.6" depth="2.4" color="#5D4037"></a-box>
-    <a-box static-body position="3.7 0.3 -3"   width="0.1" height="0.6" depth="2.4" color="#5D4037"></a-box>
+         Una caja sin tapa de 3 × 3 m (cuatro paredes) con centro en x = 3, z = -3.
+         Es grande y con paredes de 0.8 m porque hay 15 esferas de hasta 0.64 m de diámetro,
+         y no deben salirse al caer.                                               -->
+    <a-box static-body position="3 0.4 -1.5" width="3.1" height="0.8" depth="0.1" color="#5D4037"></a-box>
+    <a-box static-body position="3 0.4 -4.5" width="3.1" height="0.8" depth="0.1" color="#5D4037"></a-box>
+    <a-box static-body position="1.5 0.4 -3" width="0.1" height="0.8" depth="3"   color="#5D4037"></a-box>
+    <a-box static-body position="4.5 0.4 -3" width="0.1" height="0.8" depth="3"   color="#5D4037"></a-box>
 
     <!-- ================= ESFERAS QUE SE AGARRAN =================
          No están escritas aquí: el componente crear-esferas (en el <script>)
@@ -506,29 +616,29 @@
          open-ended="true"        → el tubo no tiene tapas (se ve hueco)
          side="double"            → se ve también la pared de adentro
          static-body              → el jugador y las esferas chocan con él
-         radius="0.28"            → RADIO_CILINDRO del script (la esfera más grande mide 0.25)
-         height="1.55"            → ALTURA_CILINDRO del script: caben 3 esferas del tamaño máximo
-         La terraza está en y = 1.2, así que el centro va en y = 1.2 + 1.55 / 2 = 1.975
+         radius="0.35"            → RADIO_CILINDRO del script (la esfera más grande mide 0.32)
+         height="1.97"            → ALTURA_CILINDRO del script: caben 3 esferas del tamaño máximo
+         La terraza está en y = 1.2, así que el centro va en y = 1.2 + 1.97 / 2 = 2.185
          Separados 1.2 m entre centros para que los tubos más anchos no se estorben. -->
-    <a-cylinder contenedor="color: rojo"   static-body position="-2.4 1.975 -8.5"
-                radius="0.28" height="1.55" open-ended="true" side="double"
+    <a-cylinder contenedor="color: rojo"   static-body position="-2.4 2.185 -8.5"
+                radius="0.35" height="1.97" open-ended="true" side="double"
                 color="#E53935" opacity="0.4"></a-cylinder>
 
-    <a-cylinder contenedor="color: verde"  static-body position="-1.2 1.975 -8.5"
-                radius="0.28" height="1.55" open-ended="true" side="double"
+    <a-cylinder contenedor="color: verde"  static-body position="-1.2 2.185 -8.5"
+                radius="0.35" height="1.97" open-ended="true" side="double"
                 color="#43A047" opacity="0.4"></a-cylinder>
 
-    <a-cylinder contenedor="color: azul"   static-body position="0 1.975 -8.5"
-                radius="0.28" height="1.55" open-ended="true" side="double"
+    <a-cylinder contenedor="color: azul"   static-body position="0 2.185 -8.5"
+                radius="0.35" height="1.97" open-ended="true" side="double"
                 color="#1E88E5" opacity="0.4"></a-cylinder>
 
-    <a-cylinder contenedor="color: morado" static-body position="1.2 1.975 -8.5"
-                radius="0.28" height="1.55" open-ended="true" side="double"
+    <a-cylinder contenedor="color: morado" static-body position="1.2 2.185 -8.5"
+                radius="0.35" height="1.97" open-ended="true" side="double"
                 color="#8E24AA" opacity="0.4"></a-cylinder>
 
     <!-- Tubo de las esferas negras (cada una vale 2 puntos) -->
-    <a-cylinder contenedor="color: negro"  static-body position="2.4 1.975 -8.5"
-                radius="0.28" height="1.55" open-ended="true" side="double"
+    <a-cylinder contenedor="color: negro"  static-body position="2.4 2.185 -8.5"
+                radius="0.35" height="1.97" open-ended="true" side="double"
                 color="#212121" opacity="0.4"></a-cylinder>
 
 
@@ -543,7 +653,7 @@
 
 
     <!-- ================= PANEL FLOTANTE (interfaz en el mundo) ================= -->
-    <a-entity position="0 3.45 -9.8">
+    <a-entity position="0 3.85 -9.8">
       <a-plane width="3" height="1.1" color="#1C2128" opacity="0.9"></a-plane>
       <a-text id="texto-instruccion" value="Mete cada esfera en su tubo (la negra vale 2)"
               align="center" width="3" position="0 0.3 0.01" color="#FFFFFF"></a-text>

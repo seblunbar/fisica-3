@@ -17,11 +17,12 @@
     /* =====================================================================
        AJUSTES QUE PUEDES CAMBIAR
        ===================================================================== */
-    const RAPIDEZ_JUGADOR = 3;      // metros por segundo al caminar
-    const RADIO_PIES = 0.35;        // tamaño de la esfera de los pies (metros)
-    const FUERZA_SALTO = 5;         // velocidad hacia arriba al saltar (m/s). Con 5 sube ~1.3 m
-    const RADIO_ESFERA = 0.12;      // tamaño de las esferas que se agarran (metros)
-    const ESFERAS_POR_COLOR = 3;    // cuántas esferas hay de cada color
+    const radius = random(0.1, 0.2);  // radio de las esferas que se agarran (metros)
+    const RAPIDEZ_JUGADOR = 5;        // metros por segundo al caminar
+    const RADIO_PIES = 0.35;          // tamaño de la esfera de los pies (metros)
+    const FUERZA_SALTO = 6;           // velocidad hacia arriba al saltar (m/s). Con 6 sube ~1.5 m
+    const RADIO_ESFERA = radius;      // tamaño de las esferas que se agarran (metros)
+    const ESFERAS_POR_COLOR = 3;      // cuántas esferas hay de cada color
 
     // Los colores del juego. Debe haber un contenedor con el mismo "nombre"
     // (mira los cilindros con contenedor="color: ..." más abajo en el HTML).
@@ -158,7 +159,7 @@
       estaEncima: function (posicionEsfera) {
         const centro = this.el.object3D.position;
         const forma = this.el.getAttribute('geometry');  // aquí vienen radius y height
-        const boca = centro.y + forma.height / 2;        // altura de la parte de arriba
+        const boca = centro.y + forma.height / 3;        // altura de la parte de arriba
 
         // Distancia horizontal (sin contar la altura) entre la esfera y el centro del tubo
         const dx = posicionEsfera.x - centro.x;

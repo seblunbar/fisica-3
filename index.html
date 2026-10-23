@@ -18,6 +18,7 @@
        AJUSTES QUE PUEDES CAMBIAR
        ===================================================================== */
     const RAPIDEZ_JUGADOR = 5;        // metros por segundo al caminar
+    const MULTIPLICADOR_CORRER = 2;   // al mantener Shift, la rapidez se multiplica por esto
     const RADIO_PIES = 0.35;          // tamaño de la esfera de los pies (metros)
     const FUERZA_SALTO = 6;           // velocidad hacia arriba al saltar (m/s). Con 6 sube ~1.5 m
     const ESFERAS_POR_COLOR = 3;    // cuántas esferas hay de cada color
@@ -57,8 +58,27 @@
     ];
 
     // --- LANZAMIENTO AL SOLTAR ---
-    const VELOCIDAD_LANZAMIENTO = 8;     // m/s que recibe la esfera hacia donde miras (0 = que solo caiga)
-    const FACTOR_VELOCIDAD_JUGADOR = 4;  // cuánto de tu propia velocidad se le suma (0 = nada, 1 = toda)
+    const VELOCIDAD_LANZAMIENTO = 4;     // m/s que recibe la esfera hacia donde miras si la sueltas sin cargar (0 = que solo caiga)
+    const FACTOR_VELOCIDAD_MANO = 3;     // multiplica la velocidad que llevaba la esfera en tu mano
+                                         // (caminar, saltar, GIRAR, mover el control). 1 = real, 3 = el triple, 0 = nada
+    const VENTANA_VELOCIDAD = 100;       // ms de movimiento que se promedian antes de soltar
+    const VELOCIDAD_MAXIMA = 50;         // tope (m/s) de la velocidad total al soltar. Si la subes mucho,
+                                         // la esfera puede atravesar paredes delgadas (la física avanza a saltos)
+
+    // --- AGARRAR ---
+    const DISTANCIA_AGARRE = 1.5;        // metros frente a tu cabeza donde queda la esfera al agarrarla (en el centro de tu vista)
+
+    // --- CARGA DE FUERZA (mantener la esfera agarrada) ---
+    // Primero esperas TIEMPO_ANTES_DE_CARGAR segundos. Después la esfera empieza a sacudirse
+    // (lento al principio, cada vez más fuerte) y durante TIEMPO_DE_CARGA segundos su velocidad
+    // de lanzamiento sube de VELOCIDAD_LANZAMIENTO a VELOCIDAD_LANZAMIENTO_MAXIMA.
+    const TIEMPO_ANTES_DE_CARGAR = 5;        // segundos agarrada antes de que empiece la carga
+    const TIEMPO_DE_CARGA = 5;               // segundos que dura la carga (tope a los 5 + 5 = 10 s)
+    const VELOCIDAD_LANZAMIENTO_MAXIMA = 40; // m/s de lanzamiento con la carga completa
+    const SACUDIDA_AMPLITUD_MIN = 0.008;     // cuánto se mueve la esfera (m) al empezar la carga...
+    const SACUDIDA_AMPLITUD_MAX = 0.04;      // ...y al llegar al tope
+    const SACUDIDA_FRECUENCIA_MIN = 4;       // vibraciones por segundo (lenta) al empezar...
+    const SACUDIDA_FRECUENCIA_MAX = 18;      // ...y rápidas al llegar al tope
 
     const TOTAL = COLORES.length * ESFERAS_POR_COLOR; // cuántas esferas hay que guardar
 
@@ -113,8 +133,10 @@
         const derecha = new THREE.Vector3(-frente.z, 0, frente.x);
 
         // 3. Velocidad = dirección × rapidez. La velocidad en Y no la tocamos (gravedad).
-        cuerpo.velocity.x = (frente.x * adelante + derecha.x * lado) * RAPIDEZ_JUGADOR;
-        cuerpo.velocity.z = (frente.z * adelante + derecha.z * lado) * RAPIDEZ_JUGADOR;
+        const correr = teclas.ShiftLeft || teclas.ShiftRight;          // ¿Shift presionado?
+        const rapidez = correr ? RAPIDEZ_JUGADOR * MULTIPLICADOR_CORRER : RAPIDEZ_JUGADOR;
+        cuerpo.velocity.x = (frente.x * adelante + derecha.x * lado) * rapidez;
+        cuerpo.velocity.z = (frente.z * adelante + derecha.z * lado) * rapidez;
         cuerpo.angularVelocity.set(0, 0, 0);   // que la esfera no ruede
         cuerpo.wakeUp();                       // que el motor no la "duerma"
 
@@ -274,6 +296,11 @@
       },
 
       init: function () {
+        this.historial = [];         // posiciones recientes mientras la traes (para calcular su velocidad)
+        this.posMundo = new THREE.Vector3();
+        this.baseLocal = new THREE.Vector3();  // dónde va la esfera respecto a la mano, SIN la sacudida
+        this.tiempoSujeta = 0;       // segundos que llevas la esfera agarrada
+        this.fase = 0;               // para animar la sacudida
         this.mano = null;            // quién la tiene agarrada (null = nadie)
         this.colocada = false;       // ¿ya está en su contenedor?
         this.posicionInicial = this.el.object3D.position.clone();
@@ -289,8 +316,21 @@
         if (this.colocada || this.mano) return;
 
         this.el.removeAttribute('dynamic-body');           // sin física mientras la cargas
+        this.historial = [];                               // empezamos a medir su movimiento desde cero
+        this.tiempoSujeta = 0;                             // y a contar cuánto tiempo la llevas
+        this.fase = 0;
         this.mano = evento.detail.cursorEl;                // el control o la cámara
         this.mano.object3D.attach(this.el.object3D);       // ahora se mueve con la mano
+
+        // La movemos al CENTRO de lo que miras, a DISTANCIA_AGARRE metros de tu cabeza.
+        // Calculamos ese punto en el mundo y lo convertimos a la posición respecto a la mano,
+        // así funciona igual con el mouse (la mano es la cámara) y con el control del Quest
+        // (la esfera salta al centro de tu vista y después sigue al control).
+        const centroVista = posicionCabeza().add(direccionMirada().multiplyScalar(DISTANCIA_AGARRE));
+        this.mano.object3D.worldToLocal(centroVista);
+        this.el.object3D.position.copy(centroVista);
+
+        this.baseLocal.copy(this.el.object3D.position);    // su lugar "normal" en la mano (la sacudida se suma a esto)
         this.mano.addEventListener('mouseup', this.soltar);
       },
 
@@ -300,17 +340,37 @@
         this.mano = null;
 
         // Calculamos la velocidad de salida ANTES de devolver la física:
-        //   hacia donde miras × VELOCIDAD_LANZAMIENTO  +  tu propia velocidad (caminar/saltar)
-        // Como tu velocidad ya está en coordenadas del mundo, si caminas adelante sale con
-        // más fuerza, si das vuelta a la izquierda sale empujada a la izquierda, si saltas
-        // sube con ti, etc.
-        const mirada = direccionMirada();
-        const cuerpoJugador = document.querySelector('#pies').body;
-        const vj = cuerpoJugador ? cuerpoJugador.velocity : { x: 0, y: 0, z: 0 };
-        const vx = mirada.x * VELOCIDAD_LANZAMIENTO + vj.x * FACTOR_VELOCIDAD_JUGADOR;
-        const vy = mirada.y * VELOCIDAD_LANZAMIENTO + vj.y * FACTOR_VELOCIDAD_JUGADOR;
-        const vz = mirada.z * VELOCIDAD_LANZAMIENTO + vj.z * FACTOR_VELOCIDAD_JUGADOR;
+        //   (hacia donde miras × velocidad de lanzamiento)  +  (velocidad que llevaba la esfera × FACTOR_VELOCIDAD_MANO)
+        // La velocidad de lanzamiento es VELOCIDAD_LANZAMIENTO, más lo que hayas cargado
+        // si la tuviste agarrada más de TIEMPO_ANTES_DE_CARGAR segundos.
+        //
+        // La velocidad que llevaba la esfera la medimos con su posición en el mundo durante los
+        // últimos instantes (ver tick). Así cuenta TODO: caminar, saltar, dar vuelta (la esfera
+        // describe un arco al girar la cámara) y, en el Quest, el movimiento del control.
+        const velocidadMano = new THREE.Vector3();
+        const h = this.historial;
+        if (h.length >= 2) {
+          const primera = h[0], ultima = h[h.length - 1];
+          const dt = (ultima.t - primera.t) / 1000;       // segundos entre la primera y la última muestra
+          if (dt > 0.02) {
+            velocidadMano.set((ultima.x - primera.x) / dt,
+                              (ultima.y - primera.y) / dt,
+                              (ultima.z - primera.z) / dt);
+          }
+        }
 
+        const progreso = this.progresoCarga();             // 0 = sin carga, 1 = carga completa
+        const rapidezLanzamiento = VELOCIDAD_LANZAMIENTO +
+          (VELOCIDAD_LANZAMIENTO_MAXIMA - VELOCIDAD_LANZAMIENTO) * progreso;
+
+        const mirada = direccionMirada();
+        const salida = new THREE.Vector3(mirada.x, mirada.y, mirada.z)
+          .multiplyScalar(rapidezLanzamiento)
+          .add(velocidadMano.multiplyScalar(FACTOR_VELOCIDAD_MANO));
+        if (salida.length() > VELOCIDAD_MAXIMA) salida.setLength(VELOCIDAD_MAXIMA);
+        const vx = salida.x, vy = salida.y, vz = salida.z;
+
+        this.el.object3D.position.copy(this.baseLocal);    // quitamos la sacudida antes de soltarla
         this.el.sceneEl.object3D.attach(this.el.object3D); // de regreso a la escena
         this.el.setAttribute('dynamic-body', FISICA_ESFERA);
 
@@ -321,9 +381,48 @@
         else el.addEventListener('body-loaded', darVelocidad, { once: true });
       },
 
+      // Qué tanta carga lleva: 0 durante los primeros TIEMPO_ANTES_DE_CARGAR segundos,
+      // y luego sube de 0 a 1 durante TIEMPO_DE_CARGA segundos (y se queda en 1).
+      progresoCarga: function () {
+        const p = (this.tiempoSujeta - TIEMPO_ANTES_DE_CARGAR) / TIEMPO_DE_CARGA;
+        return Math.min(1, Math.max(0, p));
+      },
+
       // tick se ejecuta en cada cuadro: revisamos si la esfera llegó a un contenedor
-      tick: function () {
-        if (this.colocada || this.mano) return;
+      tick: function (tiempo, delta) {
+        if (this.colocada) return;
+
+        // MIENTRAS LA TRAES
+        if (this.mano) {
+          const dt = delta / 1000;
+          this.tiempoSujeta += dt;
+
+          // 1) Anotamos dónde está la esfera en el mundo, cuadro por cuadro, y borramos las
+          //    anotaciones más viejas que VENTANA_VELOCIDAD. Medimos su lugar "normal" (baseLocal),
+          //    sin la sacudida, para que temblar no cuente como si la lanzaras.
+          this.posMundo.copy(this.baseLocal);
+          this.mano.object3D.localToWorld(this.posMundo);
+          this.historial.push({ t: tiempo, x: this.posMundo.x, y: this.posMundo.y, z: this.posMundo.z });
+          while (this.historial.length > 2 && tiempo - this.historial[0].t > VENTANA_VELOCIDAD) {
+            this.historial.shift();
+          }
+
+          // 2) Pasados TIEMPO_ANTES_DE_CARGAR segundos, la esfera se sacude para avisar que
+          //    está cargando: empieza lenta y suave, y se vuelve más rápida y fuerte
+          //    hasta llegar al tope.
+          if (this.tiempoSujeta >= TIEMPO_ANTES_DE_CARGAR) {
+            const progreso = this.progresoCarga();
+            const amplitud = SACUDIDA_AMPLITUD_MIN + (SACUDIDA_AMPLITUD_MAX - SACUDIDA_AMPLITUD_MIN) * progreso;
+            const frecuencia = SACUDIDA_FRECUENCIA_MIN + (SACUDIDA_FRECUENCIA_MAX - SACUDIDA_FRECUENCIA_MIN) * progreso;
+            this.fase += 2 * Math.PI * frecuencia * dt;     // sumamos la fase poco a poco para que no dé saltos al acelerar
+            this.el.object3D.position.set(
+              this.baseLocal.x + amplitud * Math.sin(this.fase),
+              this.baseLocal.y + amplitud * Math.sin(this.fase * 1.3 + 1.7),
+              this.baseLocal.z + amplitud * Math.sin(this.fase * 0.8 + 3.1)
+            );
+          }
+          return;
+        }
 
         const posicion = this.el.object3D.position;
 

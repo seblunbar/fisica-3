@@ -36,19 +36,32 @@
 
     // Los colores del juego. Debe haber un contenedor con el mismo "nombre"
     // (mira los cilindros con contenedor="color: ..." más abajo en el HTML).
+    // "puntos" es cuánto vale cada esfera de ese color al guardarla en su tubo.
     const COLORES = [
-      { nombre: 'rojo',   hex: '#E53935' },
-      { nombre: 'verde',  hex: '#43A047' },
-      { nombre: 'azul',   hex: '#1E88E5' },
-      { nombre: 'morado', hex: '#8E24AA' }
+      { nombre: 'rojo',   hex: '#E53935', puntos: 1 },
+      { nombre: 'verde',  hex: '#43A047', puntos: 1 },
+      { nombre: 'azul',   hex: '#1E88E5', puntos: 1 },
+      { nombre: 'morado', hex: '#8E24AA', puntos: 1 },
+      { nombre: 'negro',  hex: '#212121', puntos: 2 }
     ];
 
+    // --- LANZAMIENTO AL SOLTAR ---
+    const VELOCIDAD_LANZAMIENTO = 4;     // m/s que recibe la esfera hacia donde miras (0 = que solo caiga)
+    const FACTOR_VELOCIDAD_JUGADOR = 1;  // cuánto de tu propia velocidad se le suma (0 = nada, 1 = toda)
+
     const TOTAL = COLORES.length * ESFERAS_POR_COLOR; // cuántas esferas hay que guardar
+
+    // Puntos máximos posibles: suma de (puntos del color × esferas de ese color)
+    const PUNTOS_MAXIMOS = COLORES.reduce(function (suma, c) {
+      return suma + c.puntos * ESFERAS_POR_COLOR;
+    }, 0);
+
+    const TEXTO_INSTRUCCION = 'Mete cada esfera en su tubo (la negra vale 2)';
 
     // Propiedades de física de las esferas (las usamos en varios lugares)
     const FISICA_ESFERA = 'mass: 1; linearDamping: 0.3; angularDamping: 0.5';
 
-    let colocadas = 0;              // cuántas esferas ya están en su contenedor
+    let puntos = 0;                 // puntos acumulados por las esferas ya guardadas
     const teclas = {};              // qué teclas están presionadas
     const palanca = { x: 0, y: 0 }; // joystick izquierdo del control del Quest
     let quiereSaltar = false;       // se pone en true al presionar Espacio o el botón A
@@ -121,7 +134,7 @@
     AFRAME.registerComponent('crear-esferas', {
       init: function () {
         const escena = this.el.sceneEl;
-        const columnas = 3;                    // esferas por fila en la cuadrícula
+        const columnas = 4;                    // esferas por fila en la cuadrícula (4 x 4 cabe en la cesta)
         const filas = Math.ceil(TOTAL / columnas);
 
         for (let i = 0; i < TOTAL; i++) {
@@ -146,7 +159,7 @@
           esfera.setAttribute('radius', radioEsfera);
           esfera.setAttribute('color', color.hex);
           esfera.setAttribute('class', 'agarrable');   // para que el mouse/láser la detecte
-          esfera.setAttribute('agarrable', 'color: ' + color.nombre);
+          esfera.setAttribute('agarrable', 'color: ' + color.nombre + '; puntos: ' + color.puntos);
           esfera.setAttribute('dynamic-body', FISICA_ESFERA);
           escena.appendChild(esfera);
         }
@@ -195,7 +208,9 @@
         const centro = this.el.object3D.position;
         const forma = this.el.getAttribute('geometry');
         const fondo = centro.y - forma.height / 2;       // altura del piso del tubo
-        const radio = esferaEl.getAttribute('radius');   // cada esfera tiene su propio radio
+        // OJO: getAttribute('radius') devuelve TEXTO y al sumarlo daba NaN (la esfera desaparecía).
+        // El radio de la geometría sí es un número.
+        const radio = Number(esferaEl.getAttribute('geometry').radius); // cada esfera tiene su propio radio
 
         // Le quitamos la física para que se quede quieta adentro
         esferaEl.removeAttribute('dynamic-body');
@@ -228,7 +243,8 @@
        ===================================================================== */
     AFRAME.registerComponent('agarrable', {
       schema: {
-        color: { type: 'string' }    // el color de esta esfera (ej. "rojo")
+        color:  { type: 'string' },            // el color de esta esfera (ej. "rojo")
+        puntos: { type: 'int', default: 1 }    // cuántos puntos vale al guardarla
       },
 
       init: function () {
@@ -257,8 +273,26 @@
         this.mano.removeEventListener('mouseup', this.soltar);
         this.mano = null;
 
+        // Calculamos la velocidad de salida ANTES de devolver la física:
+        //   hacia donde miras × VELOCIDAD_LANZAMIENTO  +  tu propia velocidad (caminar/saltar)
+        // Como tu velocidad ya está en coordenadas del mundo, si caminas adelante sale con
+        // más fuerza, si das vuelta a la izquierda sale empujada a la izquierda, si saltas
+        // sube con ti, etc.
+        const mirada = direccionMirada();
+        const cuerpoJugador = document.querySelector('#pies').body;
+        const vj = cuerpoJugador ? cuerpoJugador.velocity : { x: 0, y: 0, z: 0 };
+        const vx = mirada.x * VELOCIDAD_LANZAMIENTO + vj.x * FACTOR_VELOCIDAD_JUGADOR;
+        const vy = mirada.y * VELOCIDAD_LANZAMIENTO + vj.y * FACTOR_VELOCIDAD_JUGADOR;
+        const vz = mirada.z * VELOCIDAD_LANZAMIENTO + vj.z * FACTOR_VELOCIDAD_JUGADOR;
+
         this.el.sceneEl.object3D.attach(this.el.object3D); // de regreso a la escena
         this.el.setAttribute('dynamic-body', FISICA_ESFERA);
+
+        // Le damos la velocidad en cuanto exista el cuerpo físico
+        const el = this.el;
+        const darVelocidad = function () { el.body.velocity.set(vx, vy, vz); };
+        if (el.body) darVelocidad();
+        else el.addEventListener('body-loaded', darVelocidad, { once: true });
       },
 
       // tick se ejecuta en cada cuadro: revisamos si la esfera llegó a un contenedor
@@ -276,7 +310,7 @@
             // Color correcto: se guarda en el tubo
             contenedor.guardar(this.el);
             this.colocada = true;
-            esferaColocada();
+            esferaColocada(this.data.puntos);
           } else {
             // Color equivocado: regresa a la cesta
             this.reiniciar();
@@ -299,9 +333,26 @@
     });
 
 
+    /* Hacia dónde estás mirando (vector de largo 1, incluye arriba/abajo).
+       Usamos el objeto "camera" de three.js porque es el que sigue tu cabeza,
+       tanto con el mouse como con los visores VR. */
+    function direccionMirada() {
+      const v = new THREE.Vector3();
+      const camara = document.querySelector('#camara');
+      const camaraThree = camara.getObject3D('camera');
+      if (camaraThree) {
+        camaraThree.getWorldDirection(v);          // para una cámara, esto ya es el "frente" (-Z)
+      } else {
+        camara.object3D.getWorldDirection(v);      // respaldo: igual que en el componente jugador
+        v.negate();
+      }
+      return v;
+    }
+
+
     /* Se llama cada vez que una esfera entra a su contenedor */
-    function esferaColocada() {
-      colocadas++;
+    function esferaColocada(puntosEsfera) {
+      puntos += puntosEsfera;
 
       // CONCEPTO 2: SONIDO ESPACIAL
       // La campana está en lo alto de la torre. El sonido sale DESDE ahí:
@@ -319,14 +370,14 @@
        En Unity: un Canvas en modo "World Space". */
     function actualizarPanel() {
       document.querySelector('#texto-marcador')
-        .setAttribute('value', 'Esferas: ' + colocadas + ' / ' + TOTAL);
-      if (colocadas === TOTAL) {
+        .setAttribute('value', 'Puntos: ' + puntos + ' / ' + PUNTOS_MAXIMOS);
+      if (puntos === PUNTOS_MAXIMOS) {
         document.querySelector('#texto-instruccion').setAttribute('value', 'Castillo completado!');
       }
     }
 
     function reiniciar() {
-      colocadas = 0;
+      puntos = 0;
 
       // Vaciamos los contenedores...
       document.querySelectorAll('[contenedor]').forEach(function (tubo) {
@@ -338,7 +389,7 @@
       });
 
       document.querySelector('#texto-instruccion')
-        .setAttribute('value', 'Mete cada esfera en el tubo de su color');
+        .setAttribute('value', TEXTO_INSTRUCCION);
       actualizarPanel();
     }
 
@@ -459,21 +510,26 @@
          height="1.55"            → ALTURA_CILINDRO del script: caben 3 esferas del tamaño máximo
          La terraza está en y = 1.2, así que el centro va en y = 1.2 + 1.55 / 2 = 1.975
          Separados 1.2 m entre centros para que los tubos más anchos no se estorben. -->
-    <a-cylinder contenedor="color: rojo"   static-body position="-1.5 1.975 -8.5"
+    <a-cylinder contenedor="color: rojo"   static-body position="-2.4 1.975 -8.5"
                 radius="0.28" height="1.55" open-ended="true" side="double"
                 color="#E53935" opacity="0.4"></a-cylinder>
 
-    <a-cylinder contenedor="color: verde"  static-body position="-0.3 1.975 -8.5"
+    <a-cylinder contenedor="color: verde"  static-body position="-1.2 1.975 -8.5"
                 radius="0.28" height="1.55" open-ended="true" side="double"
                 color="#43A047" opacity="0.4"></a-cylinder>
 
-    <a-cylinder contenedor="color: azul"   static-body position="0.9 1.975 -8.5"
+    <a-cylinder contenedor="color: azul"   static-body position="0 1.975 -8.5"
                 radius="0.28" height="1.55" open-ended="true" side="double"
                 color="#1E88E5" opacity="0.4"></a-cylinder>
 
-    <a-cylinder contenedor="color: morado" static-body position="2.1 1.975 -8.5"
+    <a-cylinder contenedor="color: morado" static-body position="1.2 1.975 -8.5"
                 radius="0.28" height="1.55" open-ended="true" side="double"
                 color="#8E24AA" opacity="0.4"></a-cylinder>
+
+    <!-- Tubo de las esferas negras (cada una vale 2 puntos) -->
+    <a-cylinder contenedor="color: negro"  static-body position="2.4 1.975 -8.5"
+                radius="0.28" height="1.55" open-ended="true" side="double"
+                color="#212121" opacity="0.4"></a-cylinder>
 
 
     <!-- ================= CAMPANA con sonido 3D (encima de la torre) =================
@@ -487,12 +543,12 @@
 
 
     <!-- ================= PANEL FLOTANTE (interfaz en el mundo) ================= -->
-    <a-entity position="-1.5 3.45 -9.8">
+    <a-entity position="0 3.45 -9.8">
       <a-plane width="3" height="1.1" color="#1C2128" opacity="0.9"></a-plane>
-      <a-text id="texto-instruccion" value="Mete cada esfera en el tubo de su color"
+      <a-text id="texto-instruccion" value="Mete cada esfera en su tubo (la negra vale 2)"
               align="center" width="3" position="0 0.3 0.01" color="#FFFFFF"></a-text>
       <!-- El número se escribe desde el script (actualizarPanel) -->
-      <a-text id="texto-marcador" value="Esferas: 0"
+      <a-text id="texto-marcador" value="Puntos: 0"
               align="center" width="4" position="0 0 0.01" color="#FFB547"></a-text>
       <!-- Botón: tiene class="agarrable" para que el láser lo detecte,
            pero no el componente agarrable, así que no se mueve -->

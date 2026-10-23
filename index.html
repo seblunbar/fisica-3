@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Castillo VR: física, agarrar, sonido y panel</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- 1) A-Frame: el motor 3D/VR -->
+  <script src="https://aframe.io/releases/1.7.1/aframe.min.js"></script>
+
+  <!-- 2) Librería de física. Agrega dos componentes:
+          static-body  → objeto FIJO: no se mueve, pero las cosas chocan con él (muros, piso)
+          dynamic-body → objeto con MASA: cae por gravedad, rebota y choca -->
+  <script src="https://cdn.jsdelivr.net/npm/@c-frame/aframe-physics-system@4.2.2/dist/aframe-physics-system.min.js"></script>
+
+  <script>
+    /* =====================================================================
+       AJUSTES QUE PUEDES CAMBIAR
+       ===================================================================== */
+    const RAPIDEZ_JUGADOR = 3;      // metros por segundo al caminar
+    const RADIO_PIES = 0.35;        // tamaño de la esfera de los pies (metros)
+    const FUERZA_SALTO = 5;         // velocidad hacia arriba al saltar (m/s). Con 5 sube ~1.3 m
+    const RADIO_ESFERA = 0.12;      // tamaño de las esferas que se agarran (metros)
+    const ESFERAS_POR_COLOR = 3;    // cuántas esferas hay de cada color
+
+    // Los colores del juego. Debe haber un contenedor con el mismo "nombre"
+    // (mira los cilindros con contenedor="color: ..." más abajo en el HTML).
+    const COLORES = [
+      { nombre: 'rojo',     hex: '#E53935' },
+      { nombre: 'verde',    hex: '#43A047' },
+      { nombre: 'azul',     hex: '#1E88E5' },
+      { nombre: 'amarillo', hex: '#FDD835' }
+    ];
+
+    const TOTAL = COLORES.length * ESFERAS_POR_COLOR; // cuántas esferas hay que guardar
+
+    // Propiedades de física de las esferas (las usamos en varios lugares)
+    const FISICA_ESFERA = 'mass: 1; linearDamping: 0.3; angularDamping: 0.5';
+
+    let colocadas = 0;              // cuántas esferas ya están en su contenedor
+    const teclas = {};              // qué teclas están presionadas
+    const palanca = { x: 0, y: 0 }; // joystick izquierdo del control del Quest
+    let quiereSaltar = false;       // se pone en true al presionar Espacio o el botón A
+
+
+    /* =====================================================================
+       JUGADOR CON ESFERA EN LOS PIES
+       El jugador es una esfera física invisible (dynamic-body).
+       - Nosotros le damos la velocidad HORIZONTAL (adelante, atrás, lados).
+       - La gravedad se encarga de la VERTICAL (por eso baja y sube rampas).
+       - Como es un cuerpo físico, no atraviesa muros y empuja las esferas.
+       La cámara (#rig) solo copia la posición de esta esfera.
+       ===================================================================== */
+    AFRAME.registerComponent('jugador', {
+      tick: function () {
+        const cuerpo = this.el.body;           // el cuerpo físico (Cannon.js)
+        if (!cuerpo) return;                   // aún no se crea
+
+        // 1. ¿Hacia dónde quiere moverse? Teclado (WASD) o palanca del Quest
+        let lado = 0, adelante = 0;
+        if (teclas.KeyW) adelante += 1;
+        if (teclas.KeyS) adelante -= 1;
+        if (teclas.KeyD) lado += 1;
+        if (teclas.KeyA) lado -= 1;
+        lado += palanca.x;
+        adelante -= palanca.y;                 // en la palanca, empujar adelante da y negativa
+
+        // 2. ¿Hacia dónde está mirando la cámara? (solo en el plano del piso)
+        const frente = new THREE.Vector3();
+        document.querySelector('#camara').object3D.getWorldDirection(frente);
+        frente.y = 0;
+        frente.normalize().negate();           // en A-Frame "al frente" es -Z
+        const derecha = new THREE.Vector3(-frente.z, 0, frente.x);
+
+        // 3. Velocidad = dirección × rapidez. La velocidad en Y no la tocamos (gravedad).
+        cuerpo.velocity.x = (frente.x * adelante + derecha.x * lado) * RAPIDEZ_JUGADOR;
+        cuerpo.velocity.z = (frente.z * adelante + derecha.z * lado) * RAPIDEZ_JUGADOR;
+        cuerpo.angularVelocity.set(0, 0, 0);   // que la esfera no ruede
+        cuerpo.wakeUp();                       // que el motor no la "duerma"
+
+        // 4. SALTO: solo si está en el piso. Truco sencillo: si casi no se mueve
+        //    en vertical (ni sube ni cae), suponemos que está parado en algo.
+        //    Le damos velocidad hacia arriba y la gravedad lo vuelve a bajar.
+        if (quiereSaltar) {
+          if (Math.abs(cuerpo.velocity.y) < 0.1) {
+            cuerpo.velocity.y = FUERZA_SALTO;
+          }
+          quiereSaltar = false;                // un salto por cada vez que presionas
+        }
+
+        // 5. Si se cae del mundo, regresa a la entrada
+        if (cuerpo.position.y < -5) {
+          cuerpo.position.set(0, RADIO_PIES, 4);
+          cuerpo.velocity.set(0, 0, 0);
+        }
+
+        // 6. La cámara sigue a la esfera (los pies quedan en la parte de abajo)
+        const p = this.el.object3D.position;
+        document.querySelector('#rig').object3D.position.set(p.x, p.y - RADIO_PIES, p.z);
+      }
+    });
+
+
+    /* =====================================================================
+       CREAR LAS ESFERAS EN LA CESTA
+       En vez de escribir 12 <a-sphere> a mano en el HTML, las creamos con
+       un ciclo. Se acomodan en una cuadrícula arriba de la cesta y caen
+       dentro gracias a la gravedad. Los colores se van alternando.
+       ===================================================================== */
+    AFRAME.registerComponent('crear-esferas', {
+      init: function () {
+        const escena = this.el.sceneEl;
+        const columnas = 4;                    // esferas por fila en la cuadrícula
+
+        for (let i = 0; i < TOTAL; i++) {
+          const color = COLORES[i % COLORES.length];   // 0,1,2,3,0,1,2,3...
+          const columna = i % columnas;                // posición en la fila
+          const fila = Math.floor(i / columnas);       // número de fila
+
+          // Posición inicial: encima de la cesta (centro en x = 2.5, z = -3)
+          const x = 2.05 + columna * 0.3;
+          const z = -2.6 - fila * 0.4;
+          const y = 0.8 + fila * 0.3;                  // cada fila cae un poco después
+
+          // Creamos la esfera igual que si la escribiéramos en el HTML
+          const esfera = document.createElement('a-sphere');
+          esfera.setAttribute('position', x + ' ' + y + ' ' + z);
+          esfera.setAttribute('radius', RADIO_ESFERA);
+          esfera.setAttribute('color', color.hex);
+          esfera.setAttribute('class', 'agarrable');   // para que el mouse/láser la detecte
+          esfera.setAttribute('agarrable', 'color: ' + color.nombre);
+          esfera.setAttribute('dynamic-body', FISICA_ESFERA);
+          escena.appendChild(esfera);
+        }
+
+        actualizarPanel();                     // que el panel muestre "0 / TOTAL"
+      }
+    });
+
+
+    /* =====================================================================
+       CONTENEDOR CILÍNDRICO
+       Es un tubo transparente donde caben varias esferas de UN color.
+       - estaEncima(): revisa si una esfera está en la boca (parte de arriba) del tubo.
+       - guardar(): mete la esfera y la apila encima de las que ya hay.
+       - vaciar(): lo deja sin esferas (al reiniciar).
+       El cilindro tiene static-body, así que el jugador no lo atraviesa.
+       ===================================================================== */
+    AFRAME.registerComponent('contenedor', {
+      schema: {
+        color: { type: 'string' }    // qué color acepta (ej. "rojo")
+      },
+
+      init: function () {
+        this.cantidad = 0;           // cuántas esferas tiene dentro
+      },
+
+      estaEncima: function (posicionEsfera) {
+        const centro = this.el.object3D.position;
+        const forma = this.el.getAttribute('geometry');  // aquí vienen radius y height
+        const boca = centro.y + forma.height / 2;        // altura de la parte de arriba
+
+        // Distancia horizontal (sin contar la altura) entre la esfera y el centro del tubo
+        const dx = posicionEsfera.x - centro.x;
+        const dz = posicionEsfera.z - centro.z;
+        const distancia = Math.sqrt(dx * dx + dz * dz);
+
+        // Está encima si queda dentro del círculo del tubo y cerca de la boca
+        return distancia < forma.radius + 0.05 &&
+               posicionEsfera.y > boca - 0.05 &&
+               posicionEsfera.y < boca + 0.4;
+      },
+
+      guardar: function (esferaEl) {
+        const centro = this.el.object3D.position;
+        const forma = this.el.getAttribute('geometry');
+        const fondo = centro.y - forma.height / 2;       // altura del piso del tubo
+
+        // Le quitamos la física para que se quede quieta adentro
+        esferaEl.removeAttribute('dynamic-body');
+
+        // La apilamos: la primera toca el fondo, cada una nueva va un diámetro más arriba
+        const altura = fondo + RADIO_ESFERA + this.cantidad * RADIO_ESFERA * 2;
+        esferaEl.object3D.position.set(centro.x, altura, centro.z);
+
+        this.cantidad++;
+      },
+
+      vaciar: function () {
+        this.cantidad = 0;
+      }
+    });
+
+
+    /* =====================================================================
+       CONCEPTO 1: AGARRAR Y SOLTAR (con física)
+       - Al presionar sobre la esfera: le QUITAMOS la física (si no, la gravedad
+         la jalaría) y la pegamos a la mano con attach().
+       - Al soltar: la regresamos a la escena y le DEVOLVEMOS la física,
+         así que cae desde donde la dejaste.
+       - Si cae en la boca del contenedor de SU color, se guarda y cuenta.
+       - Si cae en un contenedor de OTRO color, regresa a la cesta.
+       En Unity esto es el componente "XR Grab Interactable".
+       ===================================================================== */
+    AFRAME.registerComponent('agarrable', {
+      schema: {
+        color: { type: 'string' }    // el color de esta esfera (ej. "rojo")
+      },
+
+      init: function () {
+        this.mano = null;            // quién la tiene agarrada (null = nadie)
+        this.colocada = false;       // ¿ya está en su contenedor?
+        this.posicionInicial = this.el.object3D.position.clone();
+
+        this.agarrar = this.agarrar.bind(this);
+        this.soltar = this.soltar.bind(this);
+
+        // "mousedown" lo manda el cursor (mouse) o el láser del Quest (gatillo)
+        this.el.addEventListener('mousedown', this.agarrar);
+      },
+
+      agarrar: function (evento) {
+        if (this.colocada || this.mano) return;
+
+        this.el.removeAttribute('dynamic-body');           // sin física mientras la cargas
+        this.mano = evento.detail.cursorEl;                // el control o la cámara
+        this.mano.object3D.attach(this.el.object3D);       // ahora se mueve con la mano
+        this.mano.addEventListener('mouseup', this.soltar);
+      },
+
+      soltar: function () {
+        if (!this.mano) return;
+        this.mano.removeEventListener('mouseup', this.soltar);
+        this.mano = null;
+
+        this.el.sceneEl.object3D.attach(this.el.object3D); // de regreso a la escena
+        this.el.setAttribute('dynamic-body', FISICA_ESFERA);
+      },
+
+      // tick se ejecuta en cada cuadro: revisamos si la esfera llegó a un contenedor
+      tick: function () {
+        if (this.colocada || this.mano) return;
+
+        const posicion = this.el.object3D.position;
+        const contenedores = document.querySelectorAll('[contenedor]');
+
+        for (const el of contenedores) {
+          const contenedor = el.components.contenedor;
+          if (!contenedor.estaEncima(posicion)) continue;  // no está en este, revisa el siguiente
+
+          if (contenedor.data.color === this.data.color) {
+            // Color correcto: se guarda en el tubo
+            contenedor.guardar(this.el);
+            this.colocada = true;
+            esferaColocada();
+          } else {
+            // Color equivocado: regresa a la cesta
+            this.reiniciar();
+          }
+          return;
+        }
+      },
+
+      reiniciar: function () {
+        if (this.mano) {
+          this.mano.removeEventListener('mouseup', this.soltar);
+          this.mano = null;
+        }
+        this.el.removeAttribute('dynamic-body');
+        this.el.sceneEl.object3D.attach(this.el.object3D);
+        this.el.object3D.position.copy(this.posicionInicial);
+        this.el.setAttribute('dynamic-body', FISICA_ESFERA);
+        this.colocada = false;
+      }
+    });
+
+
+    /* Se llama cada vez que una esfera entra a su contenedor */
+    function esferaColocada() {
+      colocadas++;
+
+      // CONCEPTO 2: SONIDO ESPACIAL
+      // La campana está en lo alto de la torre. El sonido sale DESDE ahí:
+      // se oye más fuerte si estás cerca y del lado donde está.
+      // En Unity: un AudioSource con "Spatial Blend" en 3D.
+      document.querySelector('#campana').components.sound.playSound();
+
+      actualizarPanel();
+    }
+
+
+    /* CONCEPTO 3: INTERFAZ DENTRO DEL MUNDO
+       El panel es un plano con textos que flota en la escena.
+       Para cambiar lo que dice, se cambia el atributo "value" del texto.
+       En Unity: un Canvas en modo "World Space". */
+    function actualizarPanel() {
+      document.querySelector('#texto-marcador')
+        .setAttribute('value', 'Esferas: ' + colocadas + ' / ' + TOTAL);
+      if (colocadas === TOTAL) {
+        document.querySelector('#texto-instruccion').setAttribute('value', 'Castillo completado!');
+      }
+    }
+
+    function reiniciar() {
+      colocadas = 0;
+
+      // Vaciamos los contenedores...
+      document.querySelectorAll('[contenedor]').forEach(function (tubo) {
+        tubo.components.contenedor.vaciar();
+      });
+      // ...y regresamos todas las esferas a la cesta
+      document.querySelectorAll('[agarrable]').forEach(function (esfera) {
+        esfera.components.agarrable.reiniciar();
+      });
+
+      document.querySelector('#texto-instruccion')
+        .setAttribute('value', 'Mete cada esfera en el tubo de su color');
+      actualizarPanel();
+    }
+
+
+    /* Botón del panel: responde al cursor o al láser con el evento "click" */
+    AFRAME.registerComponent('boton-reiniciar', {
+      init: function () {
+        this.el.addEventListener('click', reiniciar);
+        this.el.addEventListener('mouseenter', () => this.el.setAttribute('color', '#FFD27F'));
+        this.el.addEventListener('mouseleave', () => this.el.setAttribute('color', '#FFB547'));
+      }
+    });
+
+
+    /* Palanca izquierda del control del Quest → caminar */
+    AFRAME.registerComponent('palanca-caminar', {
+      init: function () {
+        this.el.addEventListener('thumbstickmoved', function (e) {
+          palanca.x = e.detail.x;
+          palanca.y = e.detail.y;
+        });
+      }
+    });
+
+
+    /* Botón A del control DERECHO del Quest → saltar */
+    AFRAME.registerComponent('boton-saltar', {
+      init: function () {
+        this.el.addEventListener('abuttondown', function () {
+          quiereSaltar = true;
+        });
+      }
+    });
+
+
+    /* Teclado: guardamos qué teclas están presionadas. R = reiniciar, Espacio = saltar */
+    window.addEventListener('keydown', function (e) {
+      teclas[e.code] = true;
+      if (e.code === 'KeyR') reiniciar();
+      if (e.code === 'Space') {
+        quiereSaltar = true;
+        e.preventDefault();                  // que la página no haga scroll
+      }
+    });
+    window.addEventListener('keyup', function (e) { teclas[e.code] = false; });
+  </script>
+</head>
+
+<body>
+  <!-- physics: gravity es la aceleración en Y (m/s²).
+       PRUEBA CAMBIAR: -1.62 (Luna) o -24.8 (Júpiter).
+       Pon debug: true para ver en alambre las formas físicas. -->
+  <a-scene physics="gravity: -9.8; restitution: 0.3; friction: 0.2; iterations: 20; debug: false">
+
+    <!-- El sonido debe estar en la misma carpeta que este HTML -->
+    <a-assets>
+      <audio id="sonido-campana" src="campana.wav" preload="auto"></audio>
+    </a-assets>
+
+    <a-sky color="#BFE3F2"></a-sky>
+    <a-light type="ambient" intensity="0.6"></a-light>
+    <a-light type="directional" intensity="0.8" position="3 6 4"></a-light>
+
+    <!-- PISO (estático). Es una caja de 1 m de grueso con la cara de arriba en y = 0.
+         Si fuera muy delgado, una esfera que cae rápido podría atravesarlo
+         (en un solo cuadro avanza más de lo que mide el piso). -->
+    <a-box static-body position="0 -0.5 -3" width="30" height="1" depth="30" color="#7BC8A4"></a-box>
+
+
+    <!-- ================= CASTILLO (todo es static-body) =================
+         Patio: de x = -5 a 5, y de z = 0 a -10.
+         Terraza (segundo piso) al fondo, a 1.2 m de altura.            -->
+
+    <!-- Muro del frente, con puerta de 2.4 m en medio -->
+    <a-box static-body position="-3.1 1.25 0" width="3.8" height="2.5" depth="0.3" color="#9A9488"></a-box>
+    <a-box static-body position="3.1 1.25 0" width="3.8" height="2.5" depth="0.3" color="#9A9488"></a-box>
+
+    <!-- Muros de los lados y del fondo -->
+    <a-box static-body position="-5 1.25 -5" width="0.3" height="2.5" depth="10" color="#8C867A"></a-box>
+    <a-box static-body position="5 1.25 -5" width="0.3" height="2.5" depth="10" color="#8C867A"></a-box>
+    <a-box static-body position="0 2 -10" width="10.3" height="4" depth="0.3" color="#8C867A"></a-box>
+
+    <!-- Terraza: una caja maciza de 1.2 m de alto -->
+    <a-box static-body position="0 0.6 -8.5" width="10" height="1.2" depth="3" color="#A59F92"></a-box>
+
+    <!-- RAMPA: sube 1.2 m en 3.5 m de largo (unos 19°).
+         PRUEBA CAMBIAR: el ángulo en rotation y verás si el personaje aún puede subir. -->
+    <a-box static-body position="-3.8 0.505 -5.28" rotation="18.92 0 0"
+           width="1.5" height="0.2" depth="3.7" color="#8D6E63"></a-box>
+
+    <!-- Torre en la esquina de la terraza -->
+    <a-box static-body position="4 2.7 -9" width="1.5" height="3" depth="1.5" color="#857F73"></a-box>
+
+
+    <!-- ================= CESTA donde caen las esferas al inicio =================
+         Una caja sin tapa de 1.6 × 1.6 m (cuatro paredes) con centro en x = 2.5, z = -3.
+         Es más grande para que quepan todas las esferas.                          -->
+    <a-box static-body position="2.5 0.2 -2.2" width="1.6" height="0.4" depth="0.1" color="#5D4037"></a-box>
+    <a-box static-body position="2.5 0.2 -3.8" width="1.6" height="0.4" depth="0.1" color="#5D4037"></a-box>
+    <a-box static-body position="1.7 0.2 -3"   width="0.1" height="0.4" depth="1.6" color="#5D4037"></a-box>
+    <a-box static-body position="3.3 0.2 -3"   width="0.1" height="0.4" depth="1.6" color="#5D4037"></a-box>
+
+    <!-- ================= ESFERAS QUE SE AGARRAN =================
+         No están escritas aquí: el componente crear-esferas (en el <script>)
+         las crea con un ciclo, varias de cada color.
+         PRUEBA CAMBIAR: ESFERAS_POR_COLOR o la lista COLORES en el script. -->
+    <a-entity crear-esferas></a-entity>
+
+
+    <!-- ================= CONTENEDORES CILÍNDRICOS en la terraza =================
+         Un tubo transparente por color. Las esferas se ven apiladas adentro.
+         contenedor="color: ..."  → qué color acepta (igual que en la lista COLORES)
+         open-ended="true"        → el tubo no tiene tapas (se ve hueco)
+         side="double"            → se ve también la pared de adentro
+         static-body              → el jugador y las esferas chocan con él
+         radius="0.18"            → un poco más ancho que una esfera (radio 0.12)
+         height="0.82"            → caben 3 esferas apiladas (3 × 0.24 m) y sobra un poco
+         La terraza está en y = 1.2, así que el centro va en y = 1.2 + 0.82 / 2 = 1.61 -->
+    <a-cylinder contenedor="color: rojo"     static-body position="-1.5 1.61 -8.5"
+                radius="0.18" height="0.82" open-ended="true" side="double"
+                color="#E53935" opacity="0.4"></a-cylinder>
+
+    <a-cylinder contenedor="color: verde"    static-body position="-0.3 1.61 -8.5"
+                radius="0.18" height="0.82" open-ended="true" side="double"
+                color="#43A047" opacity="0.4"></a-cylinder>
+
+    <a-cylinder contenedor="color: azul"     static-body position="0.9 1.61 -8.5"
+                radius="0.18" height="0.82" open-ended="true" side="double"
+                color="#1E88E5" opacity="0.4"></a-cylinder>
+
+    <a-cylinder contenedor="color: amarillo" static-body position="2.1 1.61 -8.5"
+                radius="0.18" height="0.82" open-ended="true" side="double"
+                color="#FDD835" opacity="0.4"></a-cylinder>
+
+
+    <!-- ================= CAMPANA con sonido 3D (encima de la torre) =================
+         positional: true → el sonido sale desde aquí
+         refDistance: 2   → a 2 m se oye normal; más lejos, más bajito          -->
+    <a-entity id="campana" position="4 4.6 -9"
+              sound="src: #sonido-campana; positional: true; refDistance: 2; volume: 1">
+      <a-cone radius-bottom="0.35" radius-top="0.1" height="0.5" color="#E6B422"></a-cone>
+      <a-sphere position="0 -0.28 0" radius="0.07" color="#8D6E63"></a-sphere>
+    </a-entity>
+
+
+    <!-- ================= PANEL FLOTANTE (interfaz en el mundo) ================= -->
+    <a-entity position="-1.5 3.1 -9.8">
+      <a-plane width="3" height="1.1" color="#1C2128" opacity="0.9"></a-plane>
+      <a-text id="texto-instruccion" value="Mete cada esfera en el tubo de su color"
+              align="center" width="3" position="0 0.3 0.01" color="#FFFFFF"></a-text>
+      <!-- El número se escribe desde el script (actualizarPanel) -->
+      <a-text id="texto-marcador" value="Esferas: 0"
+              align="center" width="4" position="0 0 0.01" color="#FFB547"></a-text>
+      <!-- Botón: tiene class="agarrable" para que el láser lo detecte,
+           pero no el componente agarrable, así que no se mueve -->
+      <a-plane class="agarrable" boton-reiniciar width="0.9" height="0.25"
+               position="0 -0.35 0.01" color="#FFB547"></a-plane>
+      <a-text value="Reiniciar" align="center" width="2.5" position="0 -0.35 0.02" color="#1C2128"></a-text>
+    </a-entity>
+
+
+    <!-- ================= JUGADOR ================= -->
+
+    <!-- Esfera de los pies: invisible, con física. Empieza afuera de la puerta. -->
+    <a-sphere id="pies" jugador visible="false" radius="0.35" position="0 0.35 4"
+              dynamic-body="mass: 5; shape: sphere; sphereRadius: 0.35; angularDamping: 1"></a-sphere>
+
+    <!-- Rig: la "cabeza y manos". Su posición la controla el componente jugador. -->
+    <a-entity id="rig" position="0 0 4">
+
+      <!-- COMPUTADORA: el mouse apunta. Mantén el clic sobre una esfera para cargarla
+           (arrastra para girar la vista) y suelta el clic para dejarla caer.
+           WASD camina y ESPACIO salta. -->
+      <a-entity id="camara" camera look-controls position="0 1.6 0"
+                cursor="rayOrigin: mouse" raycaster="objects: .agarrable"></a-entity>
+
+      <!-- QUEST: apunta con el láser y mantén el GATILLO para agarrar.
+           La palanca del control IZQUIERDO sirve para caminar.
+           El botón A del control DERECHO sirve para saltar. -->
+      <a-entity laser-controls="hand: right" raycaster="objects: .agarrable; far: 6" boton-saltar></a-entity>
+      <a-entity laser-controls="hand: left"  raycaster="objects: .agarrable; far: 6" palanca-caminar></a-entity>
+    </a-entity>
+
+  </a-scene>
+</body>
+</html>

@@ -20,16 +20,27 @@
     const RAPIDEZ_JUGADOR = 5;        // metros por segundo al caminar
     const RADIO_PIES = 0.35;          // tamaño de la esfera de los pies (metros)
     const FUERZA_SALTO = 6;           // velocidad hacia arriba al saltar (m/s). Con 6 sube ~1.5 m
-    const RADIO_ESFERA = 0.1;      // tamaño de las esferas que se agarran (metros)
     const ESFERAS_POR_COLOR = 3;    // cuántas esferas hay de cada color
+
+    // --- TAMAÑOS (metros) ---
+    // El radio de cada esfera se sortea entre RADIO_ESFERA_MIN y RADIO_ESFERA_MAX.
+    // El máximo se calcula a partir del cilindro para que NUNCA sea más grande que él.
+    // OJO: RADIO_CILINDRO y ALTURA_CILINDRO deben coincidir con radius y height
+    // de los <a-cylinder> que están más abajo en el HTML.
+    const RADIO_CILINDRO = 0.28;                            // radio del tubo contenedor
+    const MARGEN_CILINDRO = 0.03;                           // holgura entre esfera máxima y pared del tubo
+    const RADIO_ESFERA_MAX = RADIO_CILINDRO - MARGEN_CILINDRO; // 0.25: la esfera más grande que cabe
+    const RADIO_ESFERA_MIN = 0.12;                          // la esfera más chica
+    const ALTURA_CILINDRO = ESFERAS_POR_COLOR * 2 * RADIO_ESFERA_MAX + 0.05; // caben todas, incluso si todas salen del tamaño máximo (1.55)
+    const SEPARACION_ESFERAS = RADIO_ESFERA_MAX * 2 + 0.05; // espacio entre centros al aparecer (evita choques)
 
     // Los colores del juego. Debe haber un contenedor con el mismo "nombre"
     // (mira los cilindros con contenedor="color: ..." más abajo en el HTML).
     const COLORES = [
-      { nombre: 'rojo',     hex: '#E53935' },
-      { nombre: 'verde',    hex: '#43A047' },
-      { nombre: 'azul',     hex: '#1E88E5' },
-      { nombre: 'amarillo', hex: '#FDD835' }
+      { nombre: 'rojo',   hex: '#E53935' },
+      { nombre: 'verde',  hex: '#43A047' },
+      { nombre: 'azul',   hex: '#1E88E5' },
+      { nombre: 'morado', hex: '#8E24AA' }
     ];
 
     const TOTAL = COLORES.length * ESFERAS_POR_COLOR; // cuántas esferas hay que guardar
@@ -110,22 +121,29 @@
     AFRAME.registerComponent('crear-esferas', {
       init: function () {
         const escena = this.el.sceneEl;
-        const columnas = 4;                    // esferas por fila en la cuadrícula
+        const columnas = 3;                    // esferas por fila en la cuadrícula
+        const filas = Math.ceil(TOTAL / columnas);
 
         for (let i = 0; i < TOTAL; i++) {
           const color = COLORES[i % COLORES.length];   // 0,1,2,3,0,1,2,3...
           const columna = i % columnas;                // posición en la fila
           const fila = Math.floor(i / columnas);       // número de fila
 
-          // Posición inicial: encima de la cesta (centro en x = 2.5, z = -3)
-          const x = 2.05 + columna * 0.3;
-          const z = -2.6 - fila * 0.4;
-          const y = 0.8 + fila * 0.3;                  // cada fila cae un poco después
+          // RADIO ALEATORIO: un número al azar entre el mínimo y el máximo.
+          // Math.random() da un valor entre 0 y 1; lo "estiramos" al rango que queremos.
+          const radioEsfera = RADIO_ESFERA_MIN + Math.random() * (RADIO_ESFERA_MAX - RADIO_ESFERA_MIN);
+
+          // Posición inicial: encima de la cesta (centro en x = 2.5, z = -3).
+          // La separación es mayor que el diámetro de la esfera más grande,
+          // así ninguna nace tocando a otra y no salen disparadas.
+          const x = 2.5 + (columna - (columnas - 1) / 2) * SEPARACION_ESFERAS;
+          const z = -3 + (fila - (filas - 1) / 2) * SEPARACION_ESFERAS;
+          const y = 1.0 + fila * 0.1;                  // cada fila cae un poquito después
 
           // Creamos la esfera igual que si la escribiéramos en el HTML
           const esfera = document.createElement('a-sphere');
           esfera.setAttribute('position', x + ' ' + y + ' ' + z);
-          esfera.setAttribute('radius', RADIO_ESFERA);
+          esfera.setAttribute('radius', radioEsfera);
           esfera.setAttribute('color', color.hex);
           esfera.setAttribute('class', 'agarrable');   // para que el mouse/láser la detecte
           esfera.setAttribute('agarrable', 'color: ' + color.nombre);
@@ -153,41 +171,47 @@
 
       init: function () {
         this.cantidad = 0;           // cuántas esferas tiene dentro
+        this.nivel = 0;              // cuánta altura ya está ocupada por esferas apiladas
       },
 
       estaEncima: function (posicionEsfera) {
         const centro = this.el.object3D.position;
         const forma = this.el.getAttribute('geometry');  // aquí vienen radius y height
-        const boca = centro.y + forma.height / 3;        // altura de la parte de arriba
+        const boca = centro.y + forma.height / 2;        // altura de la parte de arriba del tubo
 
         // Distancia horizontal (sin contar la altura) entre la esfera y el centro del tubo
         const dx = posicionEsfera.x - centro.x;
         const dz = posicionEsfera.z - centro.z;
         const distancia = Math.sqrt(dx * dx + dz * dz);
 
-        // Está encima si queda dentro del círculo del tubo y cerca de la boca
+        // Está encima si queda dentro del círculo del tubo y cerca de la boca.
+        // (El margen de arriba es mayor porque ahora las esferas son más grandes.)
         return distancia < forma.radius + 0.05 &&
-               posicionEsfera.y > boca - 0.05 &&
-               posicionEsfera.y < boca + 0.4;
+               posicionEsfera.y > boca - 0.2 &&
+               posicionEsfera.y < boca + 0.6;
       },
 
       guardar: function (esferaEl) {
         const centro = this.el.object3D.position;
         const forma = this.el.getAttribute('geometry');
         const fondo = centro.y - forma.height / 2;       // altura del piso del tubo
+        const radio = esferaEl.getAttribute('radius');   // cada esfera tiene su propio radio
 
         // Le quitamos la física para que se quede quieta adentro
         esferaEl.removeAttribute('dynamic-body');
 
-        // La apilamos: la primera toca el fondo, cada una nueva va un diámetro más arriba
-        const altura = fondo + RADIO_ESFERA + this.cantidad * RADIO_ESFERA * 2;
+        // La apilamos: la primera toca el fondo, cada nueva va encima de lo ya ocupado.
+        // Como los radios son distintos, vamos sumando el diámetro real de cada una.
+        const altura = fondo + this.nivel + radio;
         esferaEl.object3D.position.set(centro.x, altura, centro.z);
 
+        this.nivel += radio * 2;
         this.cantidad++;
       },
 
       vaciar: function () {
         this.cantidad = 0;
+        this.nivel = 0;
       }
     });
 
@@ -410,12 +434,13 @@
 
 
     <!-- ================= CESTA donde caen las esferas al inicio =================
-         Una caja sin tapa de 1.6 × 1.6 m (cuatro paredes) con centro en x = 2.5, z = -3.
-         Es más grande para que quepan todas las esferas.                          -->
-    <a-box static-body position="2.5 0.2 -2.2" width="1.6" height="0.4" depth="0.1" color="#5D4037"></a-box>
-    <a-box static-body position="2.5 0.2 -3.8" width="1.6" height="0.4" depth="0.1" color="#5D4037"></a-box>
-    <a-box static-body position="1.7 0.2 -3"   width="0.1" height="0.4" depth="1.6" color="#5D4037"></a-box>
-    <a-box static-body position="3.3 0.2 -3"   width="0.1" height="0.4" depth="1.6" color="#5D4037"></a-box>
+         Una caja sin tapa de 2.4 × 2.4 m (cuatro paredes) con centro en x = 2.5, z = -3.
+         Es más grande y con paredes más altas (0.6 m) porque las esferas ahora son
+         más grandes y así no se salen al caer.                                    -->
+    <a-box static-body position="2.5 0.3 -1.8" width="2.5" height="0.6" depth="0.1" color="#5D4037"></a-box>
+    <a-box static-body position="2.5 0.3 -4.2" width="2.5" height="0.6" depth="0.1" color="#5D4037"></a-box>
+    <a-box static-body position="1.3 0.3 -3"   width="0.1" height="0.6" depth="2.4" color="#5D4037"></a-box>
+    <a-box static-body position="3.7 0.3 -3"   width="0.1" height="0.6" depth="2.4" color="#5D4037"></a-box>
 
     <!-- ================= ESFERAS QUE SE AGARRAN =================
          No están escritas aquí: el componente crear-esferas (en el <script>)
@@ -430,24 +455,25 @@
          open-ended="true"        → el tubo no tiene tapas (se ve hueco)
          side="double"            → se ve también la pared de adentro
          static-body              → el jugador y las esferas chocan con él
-         radius="0.18"            → un poco más ancho que una esfera (radio 0.12)
-         height="0.82"            → caben 3 esferas apiladas (3 × 0.24 m) y sobra un poco
-         La terraza está en y = 1.2, así que el centro va en y = 1.2 + 0.82 / 2 = 1.61 -->
-    <a-cylinder contenedor="color: rojo"     static-body position="-1.5 1.61 -8.5"
-                radius="0.18" height="0.82" open-ended="true" side="double"
+         radius="0.28"            → RADIO_CILINDRO del script (la esfera más grande mide 0.25)
+         height="1.55"            → ALTURA_CILINDRO del script: caben 3 esferas del tamaño máximo
+         La terraza está en y = 1.2, así que el centro va en y = 1.2 + 1.55 / 2 = 1.975
+         Separados 1.2 m entre centros para que los tubos más anchos no se estorben. -->
+    <a-cylinder contenedor="color: rojo"   static-body position="-1.5 1.975 -8.5"
+                radius="0.28" height="1.55" open-ended="true" side="double"
                 color="#E53935" opacity="0.4"></a-cylinder>
 
-    <a-cylinder contenedor="color: verde"    static-body position="-0.3 1.61 -8.5"
-                radius="0.18" height="0.82" open-ended="true" side="double"
+    <a-cylinder contenedor="color: verde"  static-body position="-0.3 1.975 -8.5"
+                radius="0.28" height="1.55" open-ended="true" side="double"
                 color="#43A047" opacity="0.4"></a-cylinder>
 
-    <a-cylinder contenedor="color: azul"     static-body position="0.9 1.61 -8.5"
-                radius="0.18" height="0.82" open-ended="true" side="double"
+    <a-cylinder contenedor="color: azul"   static-body position="0.9 1.975 -8.5"
+                radius="0.28" height="1.55" open-ended="true" side="double"
                 color="#1E88E5" opacity="0.4"></a-cylinder>
 
-    <a-cylinder contenedor="color: amarillo" static-body position="2.1 1.61 -8.5"
-                radius="0.18" height="0.82" open-ended="true" side="double"
-                color="#FDD835" opacity="0.4"></a-cylinder>
+    <a-cylinder contenedor="color: morado" static-body position="2.1 1.975 -8.5"
+                radius="0.28" height="1.55" open-ended="true" side="double"
+                color="#8E24AA" opacity="0.4"></a-cylinder>
 
 
     <!-- ================= CAMPANA con sonido 3D (encima de la torre) =================
@@ -461,7 +487,7 @@
 
 
     <!-- ================= PANEL FLOTANTE (interfaz en el mundo) ================= -->
-    <a-entity position="-1.5 3.1 -9.8">
+    <a-entity position="-1.5 3.45 -9.8">
       <a-plane width="3" height="1.1" color="#1C2128" opacity="0.9"></a-plane>
       <a-text id="texto-instruccion" value="Mete cada esfera en el tubo de su color"
               align="center" width="3" position="0 0.3 0.01" color="#FFFFFF"></a-text>
